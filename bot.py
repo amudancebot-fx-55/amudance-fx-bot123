@@ -42,9 +42,9 @@ USER_FILE = "users.json"
 SIGNAL_FILE = "signals.json"
 CREDIT_FILE = "credits.json"
 FREE_FILE = "free_trial.json"
-WHITELIST_FILE = "whitelist.json"
+PENDING_FILE = "pending_payments.json"
 
-for f in [USER_FILE, SIGNAL_FILE, CREDIT_FILE, FREE_FILE, WHITELIST_FILE]:
+for f in [USER_FILE, SIGNAL_FILE, CREDIT_FILE, FREE_FILE, PENDING_FILE]:
     if not os.path.exists(f):
         with open(f, "w") as x:
             json.dump({}, x)
@@ -107,12 +107,6 @@ def free_left(uid):
     return max(0, FREE_LIMIT - get_free_used(uid))
 
 # =========================
-# WHITELIST SYSTEM
-# =========================
-def is_whitelisted(uid):
-    return str(uid) in load(WHITELIST_FILE)
-
-# =========================
 # RATE LIMIT
 # =========================
 last_time = {}
@@ -123,6 +117,14 @@ def rate_limit(uid):
         return False
     last_time[uid] = now
     return True
+
+# =========================
+# PAYSTACK VERIFY (FIX)
+# =========================
+def verify_payment(ref):
+    url = f"https://api.paystack.co/transaction/verify/{ref}"
+    headers = {"Authorization": f"Bearer {PAYSTACK_SECRET}"}
+    return requests.get(url, headers=headers).json()
 
 # =========================
 # START
@@ -168,10 +170,11 @@ def buy(m):
     bot.send_message(m.chat.id, "Choose package:", reply_markup=markup)
 
 # =========================
-# PAYSTACK
+# PAYSTACK INIT + SAVE REF
 # =========================
 @bot.callback_query_handler(func=lambda c: c.data.startswith("buy_"))
 def pay(c):
+
     _, amount, credits = c.data.split("_")
 
     res = requests.post(
@@ -187,10 +190,19 @@ def pay(c):
         }
     ).json()
 
-    url = res.get("data", {}).get("authorization_url")
+    data = res.get("data", {})
+    url = data.get("authorization_url")
+    ref = data.get("reference")
 
     if not url:
         return bot.answer_callback_query(c.id, "Payment failed")
+
+    pending = load(PENDING_FILE)
+    pending[str(c.message.chat.id)] = {
+        "reference": ref,
+        "credits": int(credits)
+    }
+    save(PENDING_FILE, pending)
 
     bot.send_message(
         c.message.chat.id,
@@ -199,6 +211,38 @@ def pay(c):
             types.InlineKeyboardButton("PAY NOW", url=url)
         )
     )
+
+# =========================
+# MANUAL CONFIRM (FIX AUTO ISSUE)
+# =========================
+@bot.message_handler(func=lambda m: m.text == "✅ I Paid")
+def check_payment(m):
+
+    pending = load(PENDING_FILE)
+
+    if str(m.chat.id) not in pending:
+        return bot.reply_to(m, "No pending payment")
+
+    ref = pending[str(m.chat.id)]["reference"]
+    credits = pending[str(m.chat.id)]["credits"]
+
+    verify = verify_payment(ref)
+    status = verify.get("data", {}).get("status")
+
+    if status == "success":
+
+        add_credit(m.chat.id, credits)
+
+        bot.send_message(
+            m.chat.id,
+            f"✅ Payment confirmed!\n+{credits} credits added"
+        )
+
+        del pending[str(m.chat.id)]
+        save(PENDING_FILE, pending)
+
+    else:
+        bot.send_message(m.chat.id, "❌ Not confirmed yet")
 
 # =========================
 # BALANCE
@@ -218,14 +262,14 @@ def sup(m):
     bot.reply_to(m, "Contact: @yourusername")
 
 # =========================
-# ANALYZE BUTTON
+# ANALYZE
 # =========================
 @bot.message_handler(func=lambda m: m.text == "📊 Analyze Market")
 def ask(m):
     bot.reply_to(m, "Send chart screenshot 📸")
 
 # =========================
-# AI ANALYSIS (IMPROVED PROMPT + WHITELIST)
+# AI ANALYSIS (CLEAN + WHITELIST + OWNER)
 # =========================
 @bot.message_handler(content_types=['photo', 'document'])
 def analyze(m):
@@ -235,13 +279,11 @@ def analyze(m):
             return bot.reply_to(m, "⛔ Slow down")
 
         owner = (m.chat.id == ADMIN_ID)
-        whitelist = is_whitelisted(m.chat.id)
 
         free = free_left(m.chat.id)
         using_free = False
 
-        # ACCESS CONTROL
-        if not owner and not whitelist:
+        if not owner:
             if free > 0:
                 using_free = True
             elif get_credit(m.chat.id) < 1:
@@ -257,45 +299,30 @@ def analyze(m):
 
         image = Image.open(path)
 
-        confidence = 90
-
-        # =========================
-        # IMPROVED AI PROMPT
-        # =========================
         prompt = """
-You are a PROFESSIONAL Smart Money Concepts (SMC) forex analyst.
+You are a professional Smart Money Concepts trader.
 
-Analyze ONLY from the chart:
+Analyze ONLY real market structure:
 
-Focus strictly on:
-- Market Structure (HH, HL, LH, LL)
-- Liquidity zones (buy-side / sell-side)
+- Market Structure (HH HL LH LL)
+- Liquidity zones
 - Break of Structure (BOS)
 - Change of Character (CHoCH)
-- Order blocks (if visible)
-- Trend direction
+- Order blocks if visible
 
-RULES:
-- Do NOT guess randomly
-- If unclear, say: No clean setup detected
-- Be precise and institutional-level accurate
+If unclear: No clean setup detected
 
-OUTPUT FORMAT:
+OUTPUT:
 
 📊 Pair:
 ⏰ Timeframe:
-
 📈 Market Structure:
 💧 Liquidity:
-🔁 Market Phase:
-📉 Key Level:
-
 📍 Entry:
 🛑 Stop Loss:
 🎯 Take Profit 1:
 🎯 Take Profit 2:
 🎯 Take Profit 3:
-
 📈 Bias: BUY or SELL only
 ⚠ Risk Level:
 🔥 Confidence:
@@ -308,11 +335,8 @@ OUTPUT FORMAT:
 
         result = res.text
 
-        # =========================
-        # ACCESS RESULT LOGIC
-        # =========================
-        if owner or whitelist:
-            result += "\n\n👑 PREMIUM ACCESS"
+        if owner:
+            result += "\n\n👑 OWNER MODE"
         elif using_free:
             use_free(m.chat.id)
             result += f"\n\n🎁 Free left: {free_left(m.chat.id)}"
@@ -334,7 +358,7 @@ OUTPUT FORMAT:
         bot.reply_to(m, f"Error: {e}")
 
 # =========================
-# WEBHOOK
+# WEBHOOK (AUTO CREDIT ADD)
 # =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
