@@ -1,9 +1,8 @@
 import telebot
 from telebot import types
-from flask import Flask, request
+from flask import Flask
 import os
 import json
-import requests
 import threading
 import time
 from datetime import datetime
@@ -18,15 +17,20 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-PAYSTACK_SECRET = os.getenv("PAYSTACK_SECRET_KEY")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
 if not BOT_TOKEN:
     raise Exception("BOT_TOKEN missing")
+
 if not GEMINI_API_KEY:
     raise Exception("GEMINI_API_KEY missing")
-if not PAYSTACK_SECRET:
-    raise Exception("PAYSTACK_SECRET_KEY missing")
+
+# =========================
+# BANK DETAILS
+# =========================
+BANK_NAME = "OPay"
+ACCOUNT_NUMBER = "7048508048"
+ACCOUNT_NAME = "AMUJO TIMILEHIN 📊"
 
 # =========================
 # INIT
@@ -65,10 +69,18 @@ def save(f, d):
 # =========================
 # USER
 # =========================
-def add_user(uid):
+def add_user(user):
     d = load(USER_FILE)
-    if str(uid) not in d:
-        d[str(uid)] = {"joined": str(datetime.now())}
+
+    uid = str(user.id)
+
+    if uid not in d:
+        d[uid] = {
+            "username": user.username,
+            "name": user.first_name,
+            "joined": str(datetime.now())
+        }
+
         save(USER_FILE, d)
 
 # =========================
@@ -84,10 +96,12 @@ def add_credit(uid, amt):
 
 def remove_credit(uid, amt=1):
     d = load(CREDIT_FILE)
+
     if d.get(str(uid), 0) >= amt:
         d[str(uid)] -= amt
         save(CREDIT_FILE, d)
         return True
+
     return False
 
 # =========================
@@ -113,33 +127,36 @@ last_time = {}
 
 def rate_limit(uid):
     now = time.time()
+
     if uid in last_time and now - last_time[uid] < 8:
         return False
+
     last_time[uid] = now
     return True
-
-# =========================
-# PAYSTACK VERIFY (FIX)
-# =========================
-def verify_payment(ref):
-    url = f"https://api.paystack.co/transaction/verify/{ref}"
-    headers = {"Authorization": f"Bearer {PAYSTACK_SECRET}"}
-    return requests.get(url, headers=headers).json()
 
 # =========================
 # START
 # =========================
 @bot.message_handler(commands=['start'])
 def start(m):
-    add_user(m.chat.id)
+
+    add_user(m.from_user)
 
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+
     markup.add("📊 Analyze Market", "💳 Buy Credit")
     markup.add("💰 My Balance", "📞 Support")
 
     bot.send_message(
         m.chat.id,
-        f"🚀 AMUDANCE FX BOT\n\n🎁 Free: {free_left(m.chat.id)}\n💎 Credits: {get_credit(m.chat.id)}",
+        f"""
+🚀 AMUDANCE FX BOT
+
+🎁 Free Analysis Left: {free_left(m.chat.id)}
+💎 Credits: {get_credit(m.chat.id)}
+
+Send chart screenshots and get AI market analysis.
+""",
         reply_markup=markup
     )
 
@@ -148,6 +165,7 @@ def start(m):
 # =========================
 @bot.message_handler(func=lambda m: m.text == "💳 Buy Credit")
 def buy(m):
+
     markup = types.InlineKeyboardMarkup()
 
     plans = [
@@ -160,6 +178,7 @@ def buy(m):
     ]
 
     for price, credits in plans:
+
         markup.add(
             types.InlineKeyboardButton(
                 f"₦{price} = {credits} Credit(s)",
@@ -167,134 +186,274 @@ def buy(m):
             )
         )
 
-    bot.send_message(m.chat.id, "Choose package:", reply_markup=markup)
-
-# =========================
-# PAYSTACK INIT + SAVE REF
-# =========================
-@bot.callback_query_handler(func=lambda c: c.data.startswith("buy_"))
-def pay(c):
-
-    _, amount, credits = c.data.split("_")
-
-    res = requests.post(
-        "https://api.paystack.co/transaction/initialize",
-        headers={"Authorization": f"Bearer {PAYSTACK_SECRET}"},
-        json={
-            "email": f"user{c.message.chat.id}@mail.com",
-            "amount": int(amount) * 100,
-            "metadata": {
-                "user_id": c.message.chat.id,
-                "credits": int(credits)
-            }
-        }
-    ).json()
-
-    data = res.get("data", {})
-    url = data.get("authorization_url")
-    ref = data.get("reference")
-
-    if not url:
-        return bot.answer_callback_query(c.id, "Payment failed")
-
-    pending = load(PENDING_FILE)
-    pending[str(c.message.chat.id)] = {
-        "reference": ref,
-        "credits": int(credits)
-    }
-    save(PENDING_FILE, pending)
-
     bot.send_message(
-        c.message.chat.id,
-        f"Pay ₦{amount} for {credits} credits",
-        reply_markup=types.InlineKeyboardMarkup().add(
-            types.InlineKeyboardButton("PAY NOW", url=url)
-        )
+        m.chat.id,
+        "Choose credit package:",
+        reply_markup=markup
     )
 
 # =========================
-# MANUAL CONFIRM (FIX AUTO ISSUE)
+# PACKAGE SELECT
+# =========================
+@bot.callback_query_handler(func=lambda c: c.data.startswith("buy_"))
+def buy_callback(c):
+
+    _, amount, credits = c.data.split("_")
+
+    pending = load(PENDING_FILE)
+
+    pending[str(c.message.chat.id)] = {
+        "amount": int(amount),
+        "credits": int(credits),
+        "username": c.from_user.username,
+        "time": str(datetime.now())
+    }
+
+    save(PENDING_FILE, pending)
+
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add("✅ I Paid")
+
+    bot.send_message(
+        c.message.chat.id,
+        f"""
+💳 PAYMENT DETAILS
+
+🏦 Bank: {BANK_NAME}
+🔢 Account Number: {ACCOUNT_NUMBER}
+👤 Account Name: {ACCOUNT_NAME}
+
+💰 Amount: ₦{amount}
+💎 Credits: {credits}
+
+After payment click:
+✅ I Paid
+""",
+        reply_markup=markup
+    )
+
+# =========================
+# USER CLICKED I PAID
 # =========================
 @bot.message_handler(func=lambda m: m.text == "✅ I Paid")
-def check_payment(m):
+def paid(m):
 
     pending = load(PENDING_FILE)
 
     if str(m.chat.id) not in pending:
-        return bot.reply_to(m, "No pending payment")
+        return bot.reply_to(m, "❌ No pending payment")
 
-    ref = pending[str(m.chat.id)]["reference"]
-    credits = pending[str(m.chat.id)]["credits"]
+    bot.send_message(
+        m.chat.id,
+        "📸 Send payment screenshot now"
+    )
 
-    verify = verify_payment(ref)
-    status = verify.get("data", {}).get("status")
+# =========================
+# PAYMENT SCREENSHOT
+# =========================
+@bot.message_handler(content_types=['photo'])
+def handle_photo(m):
 
-    if status == "success":
+    pending = load(PENDING_FILE)
 
-        add_credit(m.chat.id, credits)
+    # =====================
+    # PAYMENT SCREENSHOT
+    # =====================
+    if str(m.chat.id) in pending:
 
-        bot.send_message(
-            m.chat.id,
-            f"✅ Payment confirmed!\n+{credits} credits added"
+        data = pending[str(m.chat.id)]
+
+        amount = data["amount"]
+        credits = data["credits"]
+
+        caption = f"""
+💰 NEW PAYMENT
+
+👤 User: @{m.from_user.username}
+🆔 ID: {m.chat.id}
+
+💵 Amount: ₦{amount}
+💎 Credits: {credits}
+
+Approve payment below:
+"""
+
+        markup = types.InlineKeyboardMarkup()
+
+        markup.add(
+            types.InlineKeyboardButton(
+                "✅ APPROVE",
+                callback_data=f"approve_{m.chat.id}_{credits}"
+            ),
+
+            types.InlineKeyboardButton(
+                "❌ REJECT",
+                callback_data=f"reject_{m.chat.id}"
+            )
         )
 
-        del pending[str(m.chat.id)]
-        save(PENDING_FILE, pending)
+        bot.send_photo(
+            ADMIN_ID,
+            m.photo[-1].file_id,
+            caption=caption,
+            reply_markup=markup
+        )
 
-    else:
-        bot.send_message(m.chat.id, "❌ Not confirmed yet")
+        return bot.reply_to(
+            m,
+            "✅ Screenshot submitted\n⏳ Waiting for admin approval"
+        )
+
+    # =====================
+    # MARKET ANALYSIS
+    # =====================
+    analyze_market(m)
+
+# =========================
+# APPROVE PAYMENT
+# =========================
+@bot.callback_query_handler(func=lambda c: c.data.startswith("approve_"))
+def approve(c):
+
+    _, user_id, credits = c.data.split("_")
+
+    user_id = int(user_id)
+    credits = int(credits)
+
+    add_credit(user_id, credits)
+
+    pending = load(PENDING_FILE)
+
+    if str(user_id) in pending:
+        del pending[str(user_id)]
+
+    save(PENDING_FILE, pending)
+
+    bot.send_message(
+        user_id,
+        f"""
+✅ PAYMENT APPROVED
+
+💎 {credits} Credit(s) Added
+
+Use:
+📊 Analyze Market
+to start analysis.
+"""
+    )
+
+    bot.answer_callback_query(c.id, "Approved")
+
+    bot.edit_message_caption(
+        caption=c.message.caption + "\n\n✅ APPROVED",
+        chat_id=c.message.chat.id,
+        message_id=c.message.message_id
+    )
+
+# =========================
+# REJECT PAYMENT
+# =========================
+@bot.callback_query_handler(func=lambda c: c.data.startswith("reject_"))
+def reject(c):
+
+    _, user_id = c.data.split("_")
+
+    user_id = int(user_id)
+
+    pending = load(PENDING_FILE)
+
+    if str(user_id) in pending:
+        del pending[str(user_id)]
+
+    save(PENDING_FILE, pending)
+
+    bot.send_message(
+        user_id,
+        "❌ Payment rejected\nContact support if this is a mistake."
+    )
+
+    bot.answer_callback_query(c.id, "Rejected")
+
+    bot.edit_message_caption(
+        caption=c.message.caption + "\n\n❌ REJECTED",
+        chat_id=c.message.chat.id,
+        message_id=c.message.message_id
+    )
 
 # =========================
 # BALANCE
 # =========================
 @bot.message_handler(func=lambda m: m.text == "💰 My Balance")
 def bal(m):
+
     bot.reply_to(
         m,
-        f"💎 Credits: {get_credit(m.chat.id)}\n🎁 Free: {free_left(m.chat.id)}"
+        f"""
+💎 Credits: {get_credit(m.chat.id)}
+🎁 Free Left: {free_left(m.chat.id)}
+"""
     )
 
 # =========================
 # SUPPORT
 # =========================
 @bot.message_handler(func=lambda m: m.text == "📞 Support")
-def sup(m):
-    bot.reply_to(m, "Contact: @yourusername")
+def support(m):
+
+    bot.reply_to(
+        m,
+        "Contact Admin: @yourusername"
+    )
 
 # =========================
-# ANALYZE
+# ANALYZE BUTTON
 # =========================
 @bot.message_handler(func=lambda m: m.text == "📊 Analyze Market")
 def ask(m):
-    bot.reply_to(m, "Send chart screenshot 📸")
+
+    bot.reply_to(
+        m,
+        "📸 Send chart screenshot"
+    )
 
 # =========================
-# AI ANALYSIS (CLEAN + WHITELIST + OWNER)
+# MARKET ANALYSIS
 # =========================
-@bot.message_handler(content_types=['photo', 'document'])
-def analyze(m):
+def analyze_market(m):
 
     try:
+
         if not rate_limit(m.chat.id):
             return bot.reply_to(m, "⛔ Slow down")
 
         owner = (m.chat.id == ADMIN_ID)
 
         free = free_left(m.chat.id)
+
         using_free = False
 
         if not owner:
+
             if free > 0:
                 using_free = True
+
             elif get_credit(m.chat.id) < 1:
-                return bot.reply_to(m, "❌ No credits")
+                return bot.reply_to(
+                    m,
+                    "❌ No credits left\nBuy credits to continue."
+                )
 
-        loading = bot.reply_to(m, "📊 Analyzing chart...")
+        loading = bot.reply_to(
+            m,
+            "📊 Analyzing chart..."
+        )
 
-        file = bot.get_file(m.photo[-1].file_id if m.photo else m.document.file_id)
+        file = bot.get_file(m.photo[-1].file_id)
+
         img = bot.download_file(file.file_path)
 
-        path = f"chart_{m.chat.id}.jpg"
+        path = f"chart_{m.chat.id}_{int(time.time())}.jpg"
+
         open(path, "wb").write(img)
 
         image = Image.open(path)
@@ -310,7 +469,8 @@ Analyze ONLY real market structure:
 - Change of Character (CHoCH)
 - Order blocks if visible
 
-If unclear: No clean setup detected
+If unclear:
+No clean setup detected
 
 OUTPUT:
 
@@ -336,15 +496,26 @@ OUTPUT:
         result = res.text
 
         if owner:
-            result += "\n\n👑 OWNER MODE"
-        elif using_free:
-            use_free(m.chat.id)
-            result += f"\n\n🎁 Free left: {free_left(m.chat.id)}"
-        else:
-            remove_credit(m.chat.id, 1)
-            result += f"\n\n💎 Credits: {get_credit(m.chat.id)}"
 
-        save(SIGNAL_FILE, {str(time.time()): result})
+            result += "\n\n👑 OWNER MODE"
+
+        elif using_free:
+
+            use_free(m.chat.id)
+
+            result += f"\n\n🎁 Free Left: {free_left(m.chat.id)}"
+
+        else:
+
+            remove_credit(m.chat.id, 1)
+
+            result += f"\n\n💎 Credits Left: {get_credit(m.chat.id)}"
+
+        signals = load(SIGNAL_FILE)
+
+        signals[str(time.time())] = result
+
+        save(SIGNAL_FILE, signals)
 
         bot.edit_message_text(
             result,
@@ -355,27 +526,15 @@ OUTPUT:
         os.remove(path)
 
     except Exception as e:
-        bot.reply_to(m, f"Error: {e}")
 
-# =========================
-# WEBHOOK (AUTO CREDIT ADD)
-# =========================
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    data = request.json
-
-    if data["event"] == "charge.success":
-        meta = data["data"]["metadata"]
-
-        add_credit(meta["user_id"], meta["credits"])
-
-        bot.send_message(
-            meta["user_id"],
-            f"✅ Payment successful +{meta['credits']} credits"
+        bot.reply_to(
+            m,
+            f"❌ Error:\n{e}"
         )
 
-    return "OK"
-
+# =========================
+# HOME
+# =========================
 @app.route("/")
 def home():
     return "BOT RUNNING"
@@ -387,5 +546,10 @@ def run():
     bot.infinity_polling(skip_pending=True)
 
 if __name__ == "__main__":
+
     threading.Thread(target=run).start()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+
+    app.run(
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", 8080))
+        )
