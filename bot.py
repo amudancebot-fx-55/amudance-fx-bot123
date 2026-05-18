@@ -1,18 +1,18 @@
 import telebot
+from telebot import types
 from flask import Flask, request
 import os
 import json
 import requests
 import threading
 import time
-import random
-from datetime import datetime, timedelta
+from datetime import datetime
 from dotenv import load_dotenv
 from google import genai
 from PIL import Image
 
 # =========================
-# LOAD ENV
+# ENV
 # =========================
 load_dotenv()
 
@@ -21,15 +21,10 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PAYSTACK_SECRET = os.getenv("PAYSTACK_SECRET_KEY")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
-# =========================
-# CHECK ENV
-# =========================
 if not BOT_TOKEN:
     raise Exception("BOT_TOKEN missing")
-
 if not GEMINI_API_KEY:
     raise Exception("GEMINI_API_KEY missing")
-
 if not PAYSTACK_SECRET:
     raise Exception("PAYSTACK_SECRET_KEY missing")
 
@@ -43,74 +38,79 @@ app = Flask(__name__)
 # =========================
 # FILES
 # =========================
-VIP_FILE = "vip_data.json"
 USER_FILE = "users.json"
 SIGNAL_FILE = "signals.json"
+CREDIT_FILE = "credits.json"
+FREE_FILE = "free_trial.json"
+WHITELIST_FILE = "whitelist.json"
 
-# =========================
-# CREATE FILES IF MISSING
-# =========================
-for file in [VIP_FILE, USER_FILE, SIGNAL_FILE]:
-    if not os.path.exists(file):
-        with open(file, "w") as f:
-            json.dump({}, f)
+for f in [USER_FILE, SIGNAL_FILE, CREDIT_FILE, FREE_FILE, WHITELIST_FILE]:
+    if not os.path.exists(f):
+        with open(f, "w") as x:
+            json.dump({}, x)
 
 # =========================
 # HELPERS
 # =========================
-def load(file):
+def load(f):
     try:
-        with open(file, "r") as f:
-            return json.load(f)
+        return json.load(open(f))
     except:
         return {}
 
-def save(file, data):
-    with open(file, "w") as f:
-        json.dump(data, f, indent=4)
+def save(f, d):
+    with open(f, "w") as x:
+        json.dump(d, x, indent=4)
 
 # =========================
-# VIP SYSTEM
-# =========================
-def add_vip(user_id, days):
-    data = load(VIP_FILE)
-
-    expiry = (
-        datetime.now() + timedelta(days=days)
-    ).timestamp()
-
-    data[str(user_id)] = expiry
-
-    save(VIP_FILE, data)
-
-def is_vip(user_id):
-    data = load(VIP_FILE)
-
-    uid = str(user_id)
-
-    if uid not in data:
-        return False
-
-    expiry = data[uid]
-
-    if datetime.now().timestamp() > expiry:
-        del data[uid]
-        save(VIP_FILE, data)
-        return False
-
-    return True
-
-# =========================
-# USERS
+# USER
 # =========================
 def add_user(uid):
-    data = load(USER_FILE)
+    d = load(USER_FILE)
+    if str(uid) not in d:
+        d[str(uid)] = {"joined": str(datetime.now())}
+        save(USER_FILE, d)
 
-    data[str(uid)] = {
-        "joined": str(datetime.now())
-    }
+# =========================
+# CREDIT SYSTEM
+# =========================
+def get_credit(uid):
+    return load(CREDIT_FILE).get(str(uid), 0)
 
-    save(USER_FILE, data)
+def add_credit(uid, amt):
+    d = load(CREDIT_FILE)
+    d[str(uid)] = d.get(str(uid), 0) + amt
+    save(CREDIT_FILE, d)
+
+def remove_credit(uid, amt=1):
+    d = load(CREDIT_FILE)
+    if d.get(str(uid), 0) >= amt:
+        d[str(uid)] -= amt
+        save(CREDIT_FILE, d)
+        return True
+    return False
+
+# =========================
+# FREE SYSTEM
+# =========================
+FREE_LIMIT = 2
+
+def get_free_used(uid):
+    return load(FREE_FILE).get(str(uid), 0)
+
+def use_free(uid):
+    d = load(FREE_FILE)
+    d[str(uid)] = d.get(str(uid), 0) + 1
+    save(FREE_FILE, d)
+
+def free_left(uid):
+    return max(0, FREE_LIMIT - get_free_used(uid))
+
+# =========================
+# WHITELIST SYSTEM
+# =========================
+def is_whitelisted(uid):
+    return str(uid) in load(WHITELIST_FILE)
 
 # =========================
 # RATE LIMIT
@@ -119,259 +119,188 @@ last_time = {}
 
 def rate_limit(uid):
     now = time.time()
-
-    if uid in last_time:
-        if now - last_time[uid] < 8:
-            return False
-
+    if uid in last_time and now - last_time[uid] < 8:
+        return False
     last_time[uid] = now
     return True
-
-# =========================
-# SIMPLE SMART MONEY ENGINE
-# =========================
-def smc_engine():
-    structure = random.choice([
-        "Bullish structure with higher highs",
-        "Bearish structure with lower lows",
-        "Sideways consolidation"
-    ])
-
-    liquidity = random.choice([
-        "Liquidity resting above highs",
-        "Liquidity resting below lows",
-        "Balanced liquidity"
-    ])
-
-    return structure, liquidity
 
 # =========================
 # START
 # =========================
 @bot.message_handler(commands=['start'])
 def start(m):
-
     add_user(m.chat.id)
 
-    text = (
-        "🚀 AMUDANCE FX BOT\n\n"
-        "Commands:\n"
-        "/pay 7\n"
-        "/pay 30\n"
-        "/pay 90\n"
-        "/myvip\n\n"
-        "Send chart screenshot for analysis 📊"
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add("📊 Analyze Market", "💳 Buy Credit")
+    markup.add("💰 My Balance", "📞 Support")
+
+    bot.send_message(
+        m.chat.id,
+        f"🚀 AMUDANCE FX BOT\n\n🎁 Free: {free_left(m.chat.id)}\n💎 Credits: {get_credit(m.chat.id)}",
+        reply_markup=markup
     )
 
-    bot.reply_to(m, text)
-
 # =========================
-# VIP STATUS
+# BUY CREDIT
 # =========================
-@bot.message_handler(commands=['myvip'])
-def myvip(m):
+@bot.message_handler(func=lambda m: m.text == "💳 Buy Credit")
+def buy(m):
+    markup = types.InlineKeyboardMarkup()
 
-    data = load(VIP_FILE)
+    plans = [
+        (500, 1),
+        (1000, 2),
+        (2000, 4),
+        (3000, 6),
+        (5000, 10),
+        (10000, 20),
+    ]
 
-    uid = str(m.chat.id)
-
-    if uid not in data:
-        return bot.reply_to(
-            m,
-            "❌ VIP inactive"
+    for price, credits in plans:
+        markup.add(
+            types.InlineKeyboardButton(
+                f"₦{price} = {credits} Credit(s)",
+                callback_data=f"buy_{price}_{credits}"
+            )
         )
 
-    expiry = datetime.fromtimestamp(data[uid])
-
-    bot.reply_to(
-        m,
-        f"💎 VIP ACTIVE\n\nExpires:\n{expiry}"
-    )
+    bot.send_message(m.chat.id, "Choose package:", reply_markup=markup)
 
 # =========================
-# PAYMENT SYSTEM
+# PAYSTACK
 # =========================
-@bot.message_handler(commands=['pay'])
-def pay(m):
+@bot.callback_query_handler(func=lambda c: c.data.startswith("buy_"))
+def pay(c):
+    _, amount, credits = c.data.split("_")
 
-    try:
-
-        parts = m.text.split()
-
-        # VALIDATE COMMAND
-        if len(parts) < 2:
-            return bot.reply_to(
-                m,
-                "Usage:\n/pay 7\n/pay 30\n/pay 90"
-            )
-
-        # GET DAYS
-        days = int(parts[1])
-
-        # VALIDATE PLAN
-        if days not in [7, 30, 90]:
-            return bot.reply_to(
-                m,
-                "Available plans:\n7, 30, 90"
-            )
-
-        # PLAN PRICES
-        if days == 7:
-            amount = 2000
-
-        elif days == 30:
-            amount = 5000
-
-        else:
-            amount = 12000
-
-        # PAYSTACK REQUEST
-        url = "https://api.paystack.co/transaction/initialize"
-
-        headers = {
-            "Authorization": f"Bearer {PAYSTACK_SECRET}",
-            "Content-Type": "application/json"
-        }
-
-        payload = {
-            "email": f"user{m.chat.id}@mail.com",
-            "amount": amount * 100,
+    res = requests.post(
+        "https://api.paystack.co/transaction/initialize",
+        headers={"Authorization": f"Bearer {PAYSTACK_SECRET}"},
+        json={
+            "email": f"user{c.message.chat.id}@mail.com",
+            "amount": int(amount) * 100,
             "metadata": {
-                "user_id": m.chat.id,
-                "days": days
+                "user_id": c.message.chat.id,
+                "credits": int(credits)
             }
         }
+    ).json()
 
-        response = requests.post(
-            url,
-            json=payload,
-            headers=headers
+    url = res.get("data", {}).get("authorization_url")
+
+    if not url:
+        return bot.answer_callback_query(c.id, "Payment failed")
+
+    bot.send_message(
+        c.message.chat.id,
+        f"Pay ₦{amount} for {credits} credits",
+        reply_markup=types.InlineKeyboardMarkup().add(
+            types.InlineKeyboardButton("PAY NOW", url=url)
         )
-
-        res = response.json()
-
-        print("PAYSTACK RESPONSE:", res)
-
-        # CHECK PAYSTACK SUCCESS
-        if not res.get("status"):
-
-            return bot.reply_to(
-                m,
-                f"❌ Paystack Error:\n{res.get('message')}"
-            )
-
-        pay_link = (
-            res.get("data", {})
-            .get("authorization_url")
-        )
-
-        # CHECK LINK
-        if not pay_link:
-            return bot.reply_to(
-                m,
-                "❌ Payment link not generated"
-            )
-
-        # SEND LINK
-        bot.reply_to(
-            m,
-            f"💳 VIP PAYMENT\n\n"
-            f"Plan: {days} days\n"
-            f"Amount: ₦{amount}\n\n"
-            f"Pay here:\n{pay_link}"
-        )
-
-    except Exception as e:
-
-        print("PAY ERROR:", e)
-
-        bot.reply_to(
-            m,
-            f"❌ ERROR:\n{e}"
-        )
+    )
 
 # =========================
-# AI ANALYSIS
+# BALANCE
+# =========================
+@bot.message_handler(func=lambda m: m.text == "💰 My Balance")
+def bal(m):
+    bot.reply_to(
+        m,
+        f"💎 Credits: {get_credit(m.chat.id)}\n🎁 Free: {free_left(m.chat.id)}"
+    )
+
+# =========================
+# SUPPORT
+# =========================
+@bot.message_handler(func=lambda m: m.text == "📞 Support")
+def sup(m):
+    bot.reply_to(m, "Contact: @yourusername")
+
+# =========================
+# ANALYZE BUTTON
+# =========================
+@bot.message_handler(func=lambda m: m.text == "📊 Analyze Market")
+def ask(m):
+    bot.reply_to(m, "Send chart screenshot 📸")
+
+# =========================
+# AI ANALYSIS (IMPROVED PROMPT + WHITELIST)
 # =========================
 @bot.message_handler(content_types=['photo', 'document'])
 def analyze(m):
 
     try:
-
         if not rate_limit(m.chat.id):
-            return bot.reply_to(
-                m,
-                "⛔ Slow down"
-            )
+            return bot.reply_to(m, "⛔ Slow down")
 
-        loading = bot.reply_to(
-            m,
-            "📊 Analyzing market..."
-        )
+        owner = (m.chat.id == ADMIN_ID)
+        whitelist = is_whitelisted(m.chat.id)
 
-        # DOWNLOAD IMAGE
-        if m.photo:
-            file_info = bot.get_file(
-                m.photo[-1].file_id
-            )
-        else:
-            file_info = bot.get_file(
-                m.document.file_id
-            )
+        free = free_left(m.chat.id)
+        using_free = False
 
-        downloaded = bot.download_file(
-            file_info.file_path
-        )
+        # ACCESS CONTROL
+        if not owner and not whitelist:
+            if free > 0:
+                using_free = True
+            elif get_credit(m.chat.id) < 1:
+                return bot.reply_to(m, "❌ No credits")
 
-        # SAVE IMAGE
+        loading = bot.reply_to(m, "📊 Analyzing chart...")
+
+        file = bot.get_file(m.photo[-1].file_id if m.photo else m.document.file_id)
+        img = bot.download_file(file.file_path)
+
         path = f"chart_{m.chat.id}.jpg"
-
-        with open(path, "wb") as f:
-            f.write(downloaded)
+        open(path, "wb").write(img)
 
         image = Image.open(path)
 
-        vip = is_vip(m.chat.id)
+        confidence = 90
 
-        structure, liquidity = smc_engine()
+        # =========================
+        # IMPROVED AI PROMPT
+        # =========================
+        prompt = """
+You are a PROFESSIONAL Smart Money Concepts (SMC) forex analyst.
 
-        confidence = (
-            random.randint(85, 97)
-            if vip
-            else random.randint(60, 80)
-        )
+Analyze ONLY from the chart:
 
-        prompt = f"""
-You are a professional Smart Money Concepts trader.
+Focus strictly on:
+- Market Structure (HH, HL, LH, LL)
+- Liquidity zones (buy-side / sell-side)
+- Break of Structure (BOS)
+- Change of Character (CHoCH)
+- Order blocks (if visible)
+- Trend direction
 
-Follow this structure:
+RULES:
+- Do NOT guess randomly
+- If unclear, say: No clean setup detected
+- Be precise and institutional-level accurate
 
-Market Structure:
-{structure}
+OUTPUT FORMAT:
 
-Liquidity:
-{liquidity}
+📊 Pair:
+⏰ Timeframe:
 
-Analyze chart and return:
+📈 Market Structure:
+💧 Liquidity:
+🔁 Market Phase:
+📉 Key Level:
 
-📊 Trend
-📉 Structure
-💧 Liquidity
-📍 Entry
-🛑 Stop Loss
-🎯 Take Profit
-📈 Bias
-⚠ Risk
-🔥 Confidence: {confidence}%
+📍 Entry:
+🛑 Stop Loss:
+🎯 Take Profit 1:
+🎯 Take Profit 2:
+🎯 Take Profit 3:
 
-If unclear, say:
-"Uncertain market condition"
-
-User:
-{'VIP' if vip else 'FREE'}
+📈 Bias: BUY or SELL only
+⚠ Risk Level:
+🔥 Confidence:
 """
 
-        # GEMINI ANALYSIS
         res = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=[prompt, image]
@@ -379,128 +308,60 @@ User:
 
         result = res.text
 
-        # SAVE SIGNAL
-        signals = load(SIGNAL_FILE)
+        # =========================
+        # ACCESS RESULT LOGIC
+        # =========================
+        if owner or whitelist:
+            result += "\n\n👑 PREMIUM ACCESS"
+        elif using_free:
+            use_free(m.chat.id)
+            result += f"\n\n🎁 Free left: {free_left(m.chat.id)}"
+        else:
+            remove_credit(m.chat.id, 1)
+            result += f"\n\n💎 Credits: {get_credit(m.chat.id)}"
 
-        signals[str(time.time())] = result
+        save(SIGNAL_FILE, {str(time.time()): result})
 
-        save(SIGNAL_FILE, signals)
-
-        # SEND RESULT
         bot.edit_message_text(
+            result,
             chat_id=m.chat.id,
-            message_id=loading.message_id,
-            text=result
+            message_id=loading.message_id
         )
 
-        # DELETE IMAGE
         os.remove(path)
 
     except Exception as e:
-
-        print("ANALYSIS ERROR:", e)
-
-        bot.reply_to(
-            m,
-            f"❌ ERROR:\n{e}"
-        )
+        bot.reply_to(m, f"Error: {e}")
 
 # =========================
 # WEBHOOK
 # =========================
 @app.route("/webhook", methods=["POST"])
 def webhook():
+    data = request.json
 
-    try:
+    if data["event"] == "charge.success":
+        meta = data["data"]["metadata"]
 
-        event = request.json
+        add_credit(meta["user_id"], meta["credits"])
 
-        print("WEBHOOK:", event)
+        bot.send_message(
+            meta["user_id"],
+            f"✅ Payment successful +{meta['credits']} credits"
+        )
 
-        # PAYMENT SUCCESS
-        if event["event"] == "charge.success":
+    return "OK"
 
-            metadata = (
-                event["data"]
-                .get("metadata", {})
-            )
-
-            user_id = metadata.get("user_id")
-            days = metadata.get("days")
-
-            if user_id and days:
-
-                add_vip(
-                    int(user_id),
-                    int(days)
-                )
-
-                bot.send_message(
-                    user_id,
-                    f"🎉 PAYMENT SUCCESSFUL\n\n"
-                    f"VIP ACTIVE FOR {days} DAYS"
-                )
-
-                bot.send_message(
-                    ADMIN_ID,
-                    f"💰 NEW VIP USER\n\n"
-                    f"User ID: {user_id}\n"
-                    f"Days: {days}"
-                )
-
-        return "OK", 200
-
-    except Exception as e:
-
-        print("WEBHOOK ERROR:", e)
-
-        return "ERROR", 500
-
-# =========================
-# HOME ROUTE
-# =========================
 @app.route("/")
 def home():
-    return "AMUDANCE FX BOT RUNNING"
+    return "BOT RUNNING"
 
 # =========================
-# BOT RUNNER
+# RUN
 # =========================
-def run_bot():
+def run():
+    bot.infinity_polling(skip_pending=True)
 
-    while True:
-
-        try:
-
-            print("BOT STARTING...")
-
-            bot.infinity_polling(
-                timeout=60,
-                long_polling_timeout=60,
-                skip_pending=True
-            )
-
-        except Exception as e:
-
-            print("BOT ERROR:", e)
-
-            time.sleep(10)
-
-# =========================
-# START EVERYTHING
-# =========================
 if __name__ == "__main__":
-
-    # START BOT THREAD
-    bot_thread = threading.Thread(
-        target=run_bot
-    )
-
-    bot_thread.daemon = True
-    bot_thread.start()
-
-    # START FLASK
-    app.run(
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT", 8080))
-    )
+    threading.Thread(target=run).start()
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
